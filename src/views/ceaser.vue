@@ -1,45 +1,63 @@
 <script setup lang="ts">
-import { ref, computed, watch, reactive } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useEventListener } from '@vueuse/core'
+import { useEventListener, useTitle } from '@vueuse/core'
 
-// Change this import to your existing Pinia store.
+// Adjust this import to match your project.
 import { useStore } from '@/store'
 
 const cipherStore = useStore()
 const { encryptedText } = storeToRefs(cipherStore)
 
-// Constants
+type CipherMode = 'encrypt' | 'decrypt'
+
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 const letters = alphabet.split('')
 const LETTER_ANGLE = 360 / 26
 
 // State
+const mode = ref<CipherMode>('encrypt')
 const message = ref('')
 const rotationDegrees = ref(0)
 const isDragging = ref(false)
+const animateMotion = ref(false)
+
+const title = computed(() =>
+  mode.value === 'encrypt' ? 'Encrypt | Caesar Cipher' : 'Decrypt | Caesar Cipher',
+)
+
+useTitle(title)
 
 // Template refs
 const wheelRef = ref<HTMLDivElement | null>(null)
+const outerWheelRef = ref<HTMLDivElement | null>(null)
 const innerWheelRef = ref<HTMLDivElement | null>(null)
 
-// Continuous positive and negative shifts
+// Shift may be positive or negative, without limits.
 const shift = computed<number>({
   get() {
     return Math.round(-rotationDegrees.value / LETTER_ANGLE)
   },
 
   set(value) {
-    if (!Number.isFinite(value)) return
+    const number = Number(value)
 
-    rotationDegrees.value = -Math.trunc(value) * LETTER_ANGLE
+    if (!Number.isFinite(number)) return
+
+    rotationDegrees.value = -Math.trunc(number) * LETTER_ANGLE
   },
 })
-const showShift = computed(() => (shift.value < 0 || shift.value > 25 ? '1' : '0'))
+
+const shownormlized = computed(() => (shift.value < 0 || shift.value > 25 ? '1' : '0'))
 
 const normalizedShift = computed(() => ((shift.value % 26) + 26) % 26)
 
-// Position letters around their circles
+// Only the active wheel rotates.
+const outerRotation = computed(() => (mode.value === 'decrypt' ? rotationDegrees.value : 0))
+
+const innerRotation = computed(() => (mode.value === 'encrypt' ? rotationDegrees.value : 0))
+
+// Position alphabet letters around a circle.
 function letterPosition(index: number, radius: number) {
   const angle = index * ((2 * Math.PI) / 26) - Math.PI / 2
 
@@ -49,16 +67,67 @@ function letterPosition(index: number, radius: number) {
   }
 }
 
-// Button rotation
+// Switch modes without spinning the inactive wheel
+// through all its previous revolutions.
+function setMode(nextMode: CipherMode): void {
+  if (mode.value === nextMode) return
+
+  // End an active drag if necessary.
+  if (activePointerId !== null) {
+    finishDrag()
+  }
+
+  animateMotion.value = false
+  mode.value = nextMode
+}
+
+// Rotate using the buttons.
 function rotateWheel(amount: number): void {
+  animateMotion.value = true
   shift.value += amount
 }
 
-// -------------------------------
-// Mouse / Touch / Stylus dragging
-// -------------------------------
+// Editable shift input.
+// Keeping a draft allows typing negative numbers.
+const shiftInput = ref('0')
+const editingShift = ref(false)
+
+watch(
+  shift,
+  (value) => {
+    if (!editingShift.value) {
+      shiftInput.value = String(value)
+    }
+  },
+  { immediate: true },
+)
+
+function commitShift(): void {
+  const raw = shiftInput.value.trim()
+
+  if (raw !== '') {
+    const value = Number(raw)
+
+    if (Number.isFinite(value)) {
+      animateMotion.value = true
+      shift.value = Math.trunc(value)
+    }
+  }
+
+  editingShift.value = false
+  shiftInput.value = String(shift.value)
+}
+
+function onShiftEnter(event: KeyboardEvent): void {
+  ;(event.target as HTMLInputElement).blur()
+}
+
+// ----------------------------------
+// Touch / mouse / stylus dragging
+// ----------------------------------
 
 let activePointerId: number | null = null
+let activeElement: HTMLDivElement | null = null
 let previousAngle = 0
 
 function getPointerAngle(event: PointerEvent): number {
@@ -72,30 +141,34 @@ function getPointerAngle(event: PointerEvent): number {
   return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI)
 }
 
-// Begin dragging
-function startDrag(event: PointerEvent): void {
-  if (!innerWheelRef.value || !wheelRef.value) return
-
-  // Ignore additional fingers while dragging.
+function startDrag(event: PointerEvent, targetMode: CipherMode): void {
+  // Only the correct wheel is draggable.
+  if (mode.value !== targetMode) return
   if (activePointerId !== null) return
+  if (!event.isPrimary) return
 
-  // Ignore right-click and other mouse buttons.
   if (event.pointerType === 'mouse' && event.button !== 0) {
     return
   }
 
+  const element = targetMode === 'encrypt' ? innerWheelRef.value : outerWheelRef.value
+
+  if (!element || !wheelRef.value) return
+
   event.preventDefault()
 
   activePointerId = event.pointerId
+  activeElement = element
   previousAngle = getPointerAngle(event)
-  isDragging.value = true
 
-  // Keep receiving events even when the finger
-  // moves outside the wheel.
-  innerWheelRef.value.setPointerCapture(event.pointerId)
+  isDragging.value = true
+  animateMotion.value = false
+
+  // Continue receiving events even when the finger
+  // moves beyond the wheel.
+  element.setPointerCapture(event.pointerId)
 }
 
-// Follow finger or mouse movement
 function moveDrag(event: PointerEvent): void {
   if (!isDragging.value) return
   if (event.pointerId !== activePointerId) return
@@ -104,7 +177,7 @@ function moveDrag(event: PointerEvent): void {
 
   let delta = currentAngle - previousAngle
 
-  // Prevent jumps when crossing +/-180 degrees.
+  // Handle crossing the +/-180 degree boundary.
   if (delta > 180) {
     delta -= 360
   } else if (delta < -180) {
@@ -115,31 +188,53 @@ function moveDrag(event: PointerEvent): void {
   previousAngle = currentAngle
 }
 
-// Finish dragging and snap to nearest letter
-function stopDrag(event: PointerEvent): void {
-  if (event.pointerId !== activePointerId) return
+function finishDrag(): void {
+  const pointerId = activePointerId
+  const element = activeElement
 
   activePointerId = null
+  activeElement = null
   isDragging.value = false
 
+  // Snap to the nearest letter.
   const nearestShift = Math.round(-rotationDegrees.value / LETTER_ANGLE)
 
+  animateMotion.value = true
   rotationDegrees.value = -nearestShift * LETTER_ANGLE
+
+  if (pointerId !== null && element?.hasPointerCapture(pointerId)) {
+    element.releasePointerCapture(pointerId)
+  }
 }
 
-// VueUse handles listener registration and cleanup.
-useEventListener(innerWheelRef, 'pointerdown', startDrag)
-useEventListener(innerWheelRef, 'pointermove', moveDrag)
-useEventListener(innerWheelRef, 'pointerup', stopDrag)
-useEventListener(innerWheelRef, 'pointercancel', stopDrag)
-useEventListener(innerWheelRef, 'lostpointercapture', stopDrag)
+function stopDrag(event: PointerEvent): void {
+  if (event.pointerId !== activePointerId) return
+  finishDrag()
+}
 
-// -------------------------------
-// Encryption
-// -------------------------------
+// Attach listeners through VueUse.
+useEventListener(outerWheelRef, 'pointerdown', (event) => {
+  startDrag(event, 'decrypt')
+})
 
-function encrypt(text: string, amount: number): string {
-  return text
+useEventListener(innerWheelRef, 'pointerdown', (event) => {
+  startDrag(event, 'encrypt')
+})
+
+// Pointer events bubble to the stationary wheel.
+useEventListener(wheelRef, 'pointermove', moveDrag)
+useEventListener(wheelRef, 'pointerup', stopDrag)
+useEventListener(wheelRef, 'pointercancel', stopDrag)
+useEventListener(wheelRef, 'lostpointercapture', stopDrag)
+
+// ----------------------------------
+// Encryption / decryption
+// ----------------------------------
+
+const transformedText = computed<string>(() => {
+  const amount = mode.value === 'encrypt' ? normalizedShift.value : -normalizedShift.value
+
+  return message.value
     .toUpperCase()
     .split('')
     .map((char) => {
@@ -147,16 +242,19 @@ function encrypt(text: string, amount: number): string {
 
       if (index === -1) return char
 
-      return alphabet.charAt((index + amount) % 26)
+      const newIndex = (((index + amount) % 26) + 26) % 26
+
+      return alphabet.charAt(newIndex)
     })
     .join('')
-}
+})
 
-// Update Pinia automatically
+// Keep your existing Pinia state updated.
+// In decrypt mode, encryptedText holds decrypted output.
 watch(
-  [message, normalizedShift],
-  ([text, amount]) => {
-    encryptedText.value = encrypt(text, amount)
+  transformedText,
+  (value) => {
+    encryptedText.value = value
   },
   { immediate: true },
 )
@@ -166,28 +264,72 @@ watch(
   <main class="cipher-container">
     <h1>Caesar Cipher Wheel</h1>
 
-    <p class="subtitle">Drag the inner wheel or use the buttons.</p>
+    <!-- Encrypt / Decrypt toggle -->
+    <div class="mode-toggle" role="group" aria-label="Cipher mode">
+      <button
+        type="button"
+        :class="{ selected: mode === 'encrypt' }"
+        :aria-pressed="mode === 'encrypt'"
+        @click="setMode('encrypt')"
+      >
+        Encrypt
+      </button>
+
+      <button
+        type="button"
+        :class="{ selected: mode === 'decrypt' }"
+        :aria-pressed="mode === 'decrypt'"
+        @click="setMode('decrypt')"
+      >
+        Decrypt
+      </button>
+    </div>
+
+    <p class="subtitle">
+      Rotate the
+      <b>{{ mode === 'encrypt' ? 'inner wheel' : 'outer wheel' }}</b>
+      {{ mode === 'encrypt' ? 'to encrypt.' : 'to decrypt.' }}
+    </p>
 
     <div class="cipher-layout">
-      <!-- LEFT: Wheel and controls -->
+      <!-- Wheel -->
       <section class="wheel-section">
         <div ref="wheelRef" class="wheel">
-          <span
-            v-for="(letter, index) in letters"
-            :key="`outer-${index}`"
-            class="letter outer-letter"
-            :style="letterPosition(index, 43)"
+          <!-- Outer wheel -->
+          <div
+            ref="outerWheelRef"
+            class="disc outer-wheel"
+            :class="{
+              active: mode === 'decrypt',
+              dragging: isDragging && mode === 'decrypt',
+              animated: animateMotion,
+            }"
+            :style="{
+              '--disc-angle': `${outerRotation}deg`,
+            }"
+            @contextmenu.prevent
           >
-            {{ letter }}
-          </span>
+            <span
+              v-for="(letter, index) in letters"
+              :key="`outer-${index}`"
+              class="letter outer-letter"
+              :style="letterPosition(index, 43)"
+            >
+              {{ letter }}
+            </span>
+          </div>
 
+          <!-- Inner wheel -->
           <div
             ref="innerWheelRef"
-            class="inner-wheel"
-            :class="{ dragging: isDragging }"
+            class="disc inner-wheel"
+            :class="{
+              active: mode === 'encrypt',
+              dragging: isDragging && mode === 'encrypt',
+              animated: animateMotion,
+            }"
             :style="{
-              '--rotation': `${rotationDegrees}deg`,
-              '--counter-rotation': `${-rotationDegrees}deg`,
+              '--disc-angle': `${innerRotation}deg`,
             }"
             @contextmenu.prevent
           >
@@ -201,41 +343,63 @@ watch(
             </span>
           </div>
 
+          <!-- Fixed centre label -->
           <div class="wheel-center">
             <span>SHIFT</span>
             <strong>{{ shift }}</strong>
           </div>
         </div>
 
+        <!-- Controls -->
         <div class="controls">
-          <button type="button" aria-label="Decrease shift" @click="rotateWheel(-1)">−</button>
+          <button
+            type="button"
+            class="shift-button"
+            aria-label="Decrease shift"
+            @click="rotateWheel(-1)"
+          >
+            −
+          </button>
 
           <div class="shift-display">
-            <input v-model.number="shift" type="number" aria-label="Cipher shift" />
+            <input id="shift-input" v-model="shift" type="number" step="1" />
           </div>
 
-          <button type="button" aria-label="Increase shift" @click="rotateWheel(1)">+</button>
+          <button
+            type="button"
+            class="shift-button"
+            aria-label="Increase shift"
+            @click="rotateWheel(1)"
+          >
+            +
+          </button>
         </div>
 
-        <p class="effective-shift" :style="{ opacity: showShift }">
+        <p class="effective-shift" :style="{ opacity: shownormlized }">
           Effective cipher shift: {{ normalizedShift }}
         </p>
       </section>
 
-      <!-- RIGHT: Text input and result -->
+      <!-- Input and output -->
       <section class="message-section">
-        <label for="cipher-message">Your message</label>
+        <label for="cipher-message">
+          {{ mode === 'encrypt' ? 'Message to encrypt' : 'Message to decrypt' }}
+        </label>
 
         <textarea
           id="cipher-message"
           v-model="message"
-          placeholder="Enter a message..."
-          rows="5"
+          :placeholder="
+            mode === 'encrypt' ? 'Enter your plaintext...' : 'Enter your encrypted text...'
+          "
+          rows="6"
         ></textarea>
 
         <div class="result">
           <div class="result-header">
-            <span>Encrypted message</span>
+            <span>
+              {{ mode === 'encrypt' ? 'Encrypted message' : 'Decrypted message' }}
+            </span>
           </div>
 
           <p>
@@ -249,15 +413,9 @@ watch(
 
 <style scoped>
 .cipher-container {
-  --primary: #1b998b;
-  --accent: #ffd166;
-  --dark: #123c37;
-  --light: #f6f8fb;
-
   min-height: 100vh;
-  padding: 30px 16px;
+  padding: 32px 16px;
   box-sizing: border-box;
-
   background: var(--light);
   color: var(--dark);
   font-family: Arial, sans-serif;
@@ -265,81 +423,154 @@ watch(
 }
 
 h1 {
-  margin: 0 0 10px;
+  margin: 0 0 24px;
   color: black;
 }
 
+/* Mode toggle */
+
+.mode-toggle {
+  display: inline-flex;
+  padding: 5px;
+  gap: 4px;
+  border-radius: 12px;
+  background: #d8ebe7;
+}
+
+.mode-toggle button {
+  min-width: 120px;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--dark);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    color 0.2s;
+}
+
+.mode-toggle button.selected {
+  background: var(--primary);
+  color: white;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 1px solid var(--primary);
+}
+
 .subtitle {
+  margin: 20px 0;
   color: #52736e;
   font-size: 14px;
 }
 
-/* Outer wheel */
+/* Responsive layout */
+
+.cipher-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.wheel-section {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Stationary wheel container */
+
 .wheel {
   position: relative;
-
-  width: min(350px, 90vw);
+  width: min(350px, 100%);
   aspect-ratio: 1;
-
-  margin: 30px auto;
+  margin: 20px auto;
   border-radius: 50%;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Both rotating discs */
+
+.disc {
+  position: absolute;
+  border-radius: 50%;
+  box-sizing: border-box;
+  transform-origin: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.disc.active {
+  cursor: grab;
+  touch-action: none;
+}
+
+.disc.dragging {
+  cursor: grabbing;
+}
+
+/* Animate button changes and snap-to-letter */
+.outer-wheel.animated,
+.inner-wheel.animated {
+  transition: transform 0.2s ease;
+}
+
+.disc.animated .letter {
+  transition: transform 0.2s ease;
+}
+
+/* Outer wheel */
+
+.outer-wheel {
+  inset: 0;
+  z-index: 1;
   background: var(--primary);
 
   box-shadow: 0 8px 25px rgba(27, 153, 139, 0.18);
 
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
+  transform: rotate(var(--disc-angle));
 }
 
-/* Draggable inner wheel */
-.inner-wheel {
-  position: absolute;
+/* Inner wheel */
 
+.inner-wheel {
   width: 71.4286%;
   height: 71.4286%;
   top: 50%;
   left: 50%;
+  z-index: 2;
 
-  border-radius: 50%;
   background: var(--accent);
   border: 3px solid var(--dark);
-  box-sizing: border-box;
 
-  transform: translate(-50%, -50%) rotate(var(--rotation));
-
-  transition: transform 0.2s ease;
-
-  /* Critical for touchscreen dragging */
-  touch-action: none;
-  -ms-touch-action: none;
-
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
-
-  cursor: grab;
-}
-
-/* No animation lag while dragging */
-.inner-wheel.dragging {
-  transition: none;
-  cursor: grabbing;
+  transform: translate(-50%, -50%) rotate(var(--disc-angle));
 }
 
 /* Letters */
+
 .letter {
   position: absolute;
-
-  transform: translate(-50%, -50%);
-
   font-size: clamp(11px, 3.6vw, 15px);
   font-weight: bold;
 
+  pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
 
-  pointer-events: none;
+  /* Cancel the rotation of the parent disc */
+  transform: translate(-50%, -50%) rotate(calc(-1 * var(--disc-angle)));
 }
 
 .outer-letter {
@@ -348,22 +579,15 @@ h1 {
 
 .inner-letter {
   color: var(--dark);
-
-  /* Counter-rotation keeps letters upright */
-  transform: translate(-50%, -50%) rotate(var(--counter-rotation));
-
-  transition: transform 0.2s ease;
 }
 
-.inner-wheel.dragging .inner-letter {
-  transition: none;
-}
+/* Fixed centre */
 
-/* Centre */
 .wheel-center {
   position: absolute;
   top: 50%;
   left: 50%;
+  z-index: 3;
 
   width: 90px;
   height: 90px;
@@ -381,7 +605,6 @@ h1 {
   gap: 5px;
 
   pointer-events: none;
-
   box-shadow: 0 0 0 3px var(--accent);
 }
 
@@ -391,52 +614,46 @@ h1 {
 }
 
 .wheel-center strong {
-  font-size: 26px;
+  font-size: 25px;
 }
 
-/* Controls */
+/* Shift controls */
+
 .controls {
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 20px;
-
   margin-top: 20px;
 }
 
-button {
+.shift-button {
   width: 48px;
   height: 48px;
-
   border: none;
   border-radius: 12px;
   background: var(--primary);
   color: white;
-
   font-size: 24px;
   cursor: pointer;
-
   touch-action: manipulation;
 }
 
-button:hover {
+.shift-button:hover {
   background: #147d72;
 }
 
-button:active {
-  transform: scale(0.95);
-}
-
 .shift-display {
-  min-width: 80px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 4px;
+  min-width: 80px;
 }
 
-.shift-display span {
+.shift-display label {
   font-size: 12px;
-  color: Black;
+  color: #52736e;
 }
 
 .shift-display input {
@@ -454,19 +671,15 @@ button:active {
   font-family: inherit;
   text-align: center;
 
-  /* Remove default input appearance */
   appearance: textfield;
   -moz-appearance: textfield;
 }
 
-/* Remove number input spinner arrows */
 .shift-display input::-webkit-inner-spin-button,
 .shift-display input::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
-
-/* Subtle focus indicator */
 .shift-display input:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 4px;
@@ -478,10 +691,13 @@ button:active {
   color: #52736e;
 }
 
-/* Message */
+/* Message section */
+
 .message-section {
-  max-width: 400px;
-  margin: 35px auto 0;
+  width: 100%;
+  max-width: 450px;
+  min-width: 0;
+  margin: 0 auto;
 
   display: flex;
   flex-direction: column;
@@ -490,7 +706,7 @@ button:active {
   text-align: left;
 }
 
-.message-section label {
+.message-section > label {
   font-size: 14px;
   font-weight: bold;
 }
@@ -498,31 +714,31 @@ button:active {
 textarea {
   width: 100%;
   box-sizing: border-box;
-
   padding: 14px;
+
   border: 2px solid #c6e5df;
-  border-radius: 4px;
+  border-radius: 10px;
 
   background: white;
   color: var(--dark);
   font-family: inherit;
   font-size: 16px;
+
   resize: vertical;
-  outline: none;
 }
 
 textarea:focus {
   border-color: var(--primary);
 }
 
-/* Encrypted output */
+/* Output */
+
 .result {
   padding: 18px;
   margin-top: 8px;
-
+  border: 1px solid var(--primary);
+  border-radius: 12px;
   background: white;
-  border: 1px solid black;
-  border-radius: 4px;
 }
 
 .result-header {
@@ -540,10 +756,8 @@ textarea:focus {
 .result-tag {
   padding: 5px 8px;
   border-radius: 5px;
-
   background: var(--accent);
   color: var(--dark);
-
   font-size: 10px;
   font-weight: bold;
 }
@@ -553,68 +767,19 @@ textarea:focus {
   font-size: 18px;
   font-weight: bold;
   line-height: 1.5;
-
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-/* Mobile */
-@media (max-width: 400px) {
-  .wheel-center {
-    width: 75px;
-    height: 75px;
-  }
+/* Desktop layout */
 
-  .wheel-center strong {
-    font-size: 22px;
-  }
-}
-
-/* Mobile-first: stacked layout */
-.cipher-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 24px;
-
-  width: 100%;
-  max-width: 1100px;
-  margin: 0 auto;
-}
-
-.wheel-section {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.message-section {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  max-width: 450px;
-  min-width: 0;
-  margin: 0 auto;
-}
-
-/* Ensure wheel fits its container */
-.wheel {
-  width: min(350px, 100%);
-  margin: 20px auto;
-}
-
-/* Desktop: wheel left, text right */
 @media (min-width: 850px) {
   .cipher-layout {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(0, 1fr);
     align-items: center;
     gap: 60px;
-  }
-
-  .wheel-section {
-    width: 100%;
   }
 
   .message-section {
@@ -628,6 +793,7 @@ textarea:focus {
 }
 
 /* Large desktop */
+
 @media (min-width: 1200px) {
   .cipher-layout {
     gap: 100px;
@@ -635,6 +801,23 @@ textarea:focus {
 
   .wheel {
     width: 380px;
+  }
+}
+
+/* Small phones */
+
+@media (max-width: 400px) {
+  .wheel-center {
+    width: 75px;
+    height: 75px;
+  }
+
+  .wheel-center strong {
+    font-size: 22px;
+  }
+
+  .mode-toggle button {
+    min-width: 105px;
   }
 }
 </style>
